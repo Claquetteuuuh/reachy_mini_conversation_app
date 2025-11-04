@@ -4,6 +4,7 @@ Ported from main_works.py camera_worker() function to provide:
 - 30Hz+ camera polling with thread-safe frame buffering
 - Face tracking integration with smooth interpolation
 - Latest frame always available for tools
+- MODIFICATION: Support pour utiliser la caméra du PC au lieu de celle du robot
 """
 
 import time
@@ -26,10 +27,38 @@ logger = logging.getLogger(__name__)
 class CameraWorker:
     """Thread-safe camera worker with frame buffering and face tracking."""
 
-    def __init__(self, reachy_mini: ReachyMini, head_tracker: Any = None) -> None:
-        """Initialize."""
+    def __init__(
+        self, 
+        reachy_mini: ReachyMini, 
+        head_tracker: Any = None,
+        use_pc_camera: bool = False,  # NOUVEAU: option pour utiliser la caméra PC
+        pc_camera_index: int = 0,     # NOUVEAU: index de la caméra PC (0 par défaut)
+    ) -> None:
+        """Initialize.
+        
+        Args:
+            reachy_mini: Instance du robot Reachy Mini
+            head_tracker: Tracker pour détecter les visages
+            use_pc_camera: Si True, utilise la caméra du PC au lieu de celle du robot
+            pc_camera_index: Index de la caméra PC à utiliser (0 pour caméra par défaut)
+        """
         self.reachy_mini = reachy_mini
         self.head_tracker = head_tracker
+        
+        # NOUVEAU: Configuration caméra PC
+        self.use_pc_camera = use_pc_camera
+        self.pc_camera = None
+        if self.use_pc_camera:
+            logger.info(f"Initialisation de la caméra PC (index {pc_camera_index})...")
+            self.pc_camera = cv2.VideoCapture(pc_camera_index)
+            if not self.pc_camera.isOpened():
+                logger.error(f"Impossible d'ouvrir la caméra PC à l'index {pc_camera_index}")
+                raise RuntimeError(f"Impossible d'ouvrir la caméra PC à l'index {pc_camera_index}")
+            else:
+                logger.info("Caméra PC initialisée avec succès")
+                # Optionnel: configurer la résolution de la caméra
+                self.pc_camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                self.pc_camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
         # Thread-safe frame storage
         self.latest_frame: NDArray[np.uint8] | None = None
@@ -93,6 +122,11 @@ class CameraWorker:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join()
+        
+        # NOUVEAU: Libérer la caméra PC si elle est utilisée
+        if self.pc_camera is not None:
+            self.pc_camera.release()
+            logger.info("Caméra PC libérée")
 
         logger.debug("Camera worker stopped")
 
@@ -111,8 +145,17 @@ class CameraWorker:
             try:
                 current_time = time.time()
 
-                # Get frame from robot
-                frame = self.reachy_mini.media.get_frame()
+                # MODIFIÉ: Get frame from robot OR PC camera
+                if self.use_pc_camera:
+                    # Capturer depuis la caméra PC
+                    ret, frame = self.pc_camera.read()
+                    if not ret or frame is None:
+                        logger.warning("Impossible de lire l'image de la caméra PC")
+                        time.sleep(0.01)
+                        continue
+                else:
+                    # Capturer depuis la caméra du robot (comportement original)
+                    frame = self.reachy_mini.media.get_frame()
 
                 if frame is not None:
                     # Thread-safe frame storage

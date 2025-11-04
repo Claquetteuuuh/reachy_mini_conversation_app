@@ -28,7 +28,12 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def handle_vision_stuff(args: argparse.Namespace, current_robot: ReachyMini) -> Tuple[CameraWorker | None, Any, Any]:
+def handle_vision_stuff(
+    args: argparse.Namespace, 
+    current_robot: ReachyMini,
+    use_pc_camera: bool = False,     
+    pc_camera_index: int = 0,         
+) -> Tuple[CameraWorker | None, Any, Any]:
     """Initialize camera, head tracker, camera worker, and vision manager.
 
     By default, vision is handled by gpt-realtime model when camera tool is used.
@@ -50,8 +55,12 @@ def handle_vision_stuff(args: argparse.Namespace, current_robot: ReachyMini) -> 
 
                 head_tracker = HeadTracker()
 
-        # Initialize camera worker
-        camera_worker = CameraWorker(current_robot, head_tracker)
+        camera_worker = CameraWorker(
+            current_robot, 
+            head_tracker,
+            use_pc_camera=use_pc_camera,       
+            pc_camera_index=pc_camera_index,   
+        )
 
         # Initialize vision manager only if local vision is requested
         if args.local_vision:
@@ -69,6 +78,7 @@ def handle_vision_stuff(args: argparse.Namespace, current_robot: ReachyMini) -> 
             )
 
     return camera_worker, head_tracker, vision_manager
+
 
 
 def setup_logger(debug: bool) -> logging.Logger:

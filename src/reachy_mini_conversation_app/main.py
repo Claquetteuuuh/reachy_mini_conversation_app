@@ -27,7 +27,7 @@ def update_chatbot(chatbot: List[Dict[str, Any]], response: Dict[str, Any]) -> L
     return chatbot
 
 
-def main() -> None:
+def main(use_pc_camera: bool=False) -> None:
     """Entrypoint for the Reachy Mini conversation app."""
     args = parse_args()
 
@@ -47,7 +47,12 @@ def main() -> None:
         robot.client.disconnect()
         sys.exit(1)
 
-    camera_worker, _, vision_manager = handle_vision_stuff(args, robot)
+    camera_worker, _, vision_manager = handle_vision_stuff(
+        args,
+        robot, 
+        use_pc_camera=use_pc_camera,
+        pc_camera_index=0
+    )
 
     movement_manager = MovementManager(
         current_robot=robot,
@@ -125,4 +130,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main(False)
