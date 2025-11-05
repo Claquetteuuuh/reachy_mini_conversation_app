@@ -1,3 +1,4 @@
+# tools.py
 from __future__ import annotations
 import abc
 import json
@@ -36,6 +37,49 @@ except ImportError as e:
     DANCE_AVAILABLE = False
     EMOTION_AVAILABLE = False
 
+try:
+    from reachy_mini_conversation_app import face_recognition
+    FACE_RECOGNITION_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Face recognition not available: {e}")
+    FACE_RECOGNITION_AVAILABLE = False
+
+try:
+    from reachy_mini_conversation_app.face_database_optimized import OptimizedFaceDatabase
+    from reachy_mini_conversation_app.camera_worker import get_current_camera_frame_base64
+    FACE_DB_OPTIMIZED_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Optimized face database not available: {e}")
+    FACE_DB_OPTIMIZED_AVAILABLE = False
+
+_optimized_face_db: "OptimizedFaceDatabase | None" = None
+
+def initialize_optimized_face_database(
+    db_path: str = "face_database.json",
+    embeddings_path: str = "face_embeddings.pkl"
+) -> "OptimizedFaceDatabase | None":
+    """Initialise la base de données optimisée de reconnaissance faciale.
+    
+    Args:
+        db_path: Chemin vers le fichier JSON de métadonnées
+        embeddings_path: Chemin vers le fichier pickle des embeddings
+    
+    Returns:
+        Instance de OptimizedFaceDatabase ou None si non disponible
+    """
+    global _optimized_face_db
+    if FACE_DB_OPTIMIZED_AVAILABLE:
+        try:
+            _optimized_face_db = OptimizedFaceDatabase(db_path, embeddings_path)
+            logger.info("✓ Optimized face database initialized with %d persons", 
+                       len(_optimized_face_db.get_all_persons()))
+            return _optimized_face_db
+        except Exception as e:
+            logger.error("Failed to initialize face database: %s", e)
+            return None
+    else:
+        logger.warning("Face database not available - missing dependencies")
+        return None
 
 def get_concrete_subclasses(base: type[Tool]) -> List[type[Tool]]:
     """Recursively find all concrete (non-abstract) subclasses of a base class."""
@@ -708,6 +752,402 @@ class DoNothing(Tool):
         reason = kwargs.get("reason", "just chilling")
         logger.info("Tool call: do_nothing reason=%s", reason)
         return {"status": "doing nothing", "reason": reason}
+
+class CompareFaces(Tool):
+    """Compare two faces from base64 encoded images to determine if they are the same person."""
+
+    name = "compare_faces"
+    description = """Compare two faces from base64 encoded images to determine if they are the same person.
+    This tool uses facial recognition to analyze and compare facial features."""
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "image1_base64": {
+                "type": "string",
+                "description": "First image encoded in base64 format (with or without data:image prefix)",
+            },
+            "image2_base64": {
+                "type": "string",
+                "description": "Second image encoded in base64 format (with or without data:image prefix)",
+            },
+            "model": {
+                "type": "string",
+                "description": "Model to use for face recognition. Options: VGG-Face (default), Facenet, OpenFace, DeepFace, ArcFace",
+                "enum": ["VGG-Face", "Facenet", "OpenFace", "DeepFace", "ArcFace"],
+            },
+        },
+        "required": ["image1_base64", "image2_base64"],
+    }
+
+    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> Dict[str, Any]:
+        """Compare two faces from base64 images."""
+        if not FACE_RECOGNITION_AVAILABLE:
+            logger.error("Face recognition not available")
+            return {"error": "Face recognition system not available. Install required packages: pip install deepface tensorflow pillow"}
+
+        image1_b64 = kwargs.get("image1_base64", "")
+        image2_b64 = kwargs.get("image2_base64", "")
+        model = kwargs.get("model", "VGG-Face")
+
+        if not image1_b64 or not image2_b64:
+            logger.warning("compare_faces: missing image data")
+            return {"error": "Both image1_base64 and image2_base64 are required"}
+
+        logger.info("Tool call: compare_faces model=%s", model)
+
+        # Run face comparison in a thread to avoid blocking
+        result = await asyncio.to_thread(
+            face_recognition.compare_faces,
+            image1_b64,
+            image2_b64,
+            model_name=model,
+            distance_metric='cosine'
+        )
+
+        # Format response for better readability
+        if result.get("success"):
+            return {
+                "success": True,
+                "same_person": result["same_person"],
+                "similarity_percentage": round(result["similarity_percentage"], 2),
+                "confidence": result["confidence"],
+                "details": {
+                    "distance": round(result["distance"], 4),
+                    "threshold": round(result["threshold"], 4),
+                    "model_used": result["model_used"],
+                }
+            }
+        else:
+            return result
+
+class IdentifyPerson(Tool):
+    """Identify the person currently in front of the camera using face recognition."""
+    
+    name = "identify_person"
+    description = """Identify the person currently in front of the camera by comparing 
+    with the local face database. Returns the person's name if recognized, or 'Unknown' if not.
+    This tool automatically uses the current camera frame - no image data needs to be provided.
+    IMPORTANT: This never sends any image data to OpenAI - everything stays local for privacy."""
+    
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "confidence_threshold": {
+                "type": "number",
+                "description": "Minimum similarity percentage to consider a match (0-100, default: 60)",
+                "default": 60
+            }
+        },
+        "required": []
+    }
+    
+    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> Dict[str, Any]:
+        """Identifie la personne devant la caméra."""
+        global _optimized_face_db
+        
+        if not FACE_DB_OPTIMIZED_AVAILABLE or _optimized_face_db is None:
+            return {
+                "error": "Face recognition database not available or not initialized. "
+                        "Please run initialize_optimized_face_database() first."
+            }
+        
+        # Récupérer l'image actuelle de la caméra
+        current_image = get_current_camera_frame_base64()
+        if not current_image:
+            return {
+                "success": False,
+                "error": "No camera frame available. Please ensure camera is active."
+            }
+        
+        confidence_threshold = float(kwargs.get("confidence_threshold", 60)) / 100  # Convertir en 0-1
+        
+        logger.info("🔍 Identifying person with threshold=%.1f%%", confidence_threshold * 100)
+        
+        # Identification ULTRA RAPIDE (quelques millisecondes!)
+        result = await asyncio.to_thread(
+            _optimized_face_db.identify,
+            current_image,
+            confidence_threshold=confidence_threshold
+        )
+        
+        if result.get("identified"):
+            logger.info("✓ Person identified: %s (%.1f%% similarity)", 
+                       result.get("name"), result.get("similarity", 0))
+        else:
+            logger.info("✗ No person identified (best match: %.1f%%)", 
+                       result.get("best_match_similarity", 0))
+        
+        return result
+
+class AddPersonToDatabase(Tool):
+    """Add a new person to the face recognition database using current camera frame."""
+    
+    name = "add_person_to_database"
+    description = """Add a new person to the face recognition database using the current camera frame.
+    Use this tool when someone asks to be added, registered, or saved in your memory.
+    Examples: "Can you remember me?", "Add me to your database", "Save my face", "Register me as John"
+    
+    IMPORTANT: This captures the current camera frame and stores it locally - no data is sent to OpenAI.
+    Ask for the person's name before calling this tool."""
+    
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "The person's name (required). Ask the user for their name before calling this tool.",
+            },
+            "role": {
+                "type": "string",
+                "description": "Optional role/description (e.g., 'friend', 'colleague', 'visitor')",
+            },
+            "capture_multiple": {
+                "type": "boolean",
+                "description": "If true, will ask the user to move their head slightly for better recognition (default: false)",
+                "default": False,
+            },
+        },
+        "required": ["name"],
+    }
+    
+    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> Dict[str, Any]:
+        """Ajoute une nouvelle personne à la base de données."""
+        global _optimized_face_db
+        
+        if not FACE_DB_OPTIMIZED_AVAILABLE or _optimized_face_db is None:
+            return {
+                "error": "Face recognition database not available or not initialized."
+            }
+        
+        name = kwargs.get("name", "").strip()
+        if not name:
+            return {
+                "success": False,
+                "error": "Name is required. Please provide the person's name."
+            }
+        
+        role = kwargs.get("role", "").strip()
+        capture_multiple = kwargs.get("capture_multiple", False)
+        
+        # Vérifier si la personne existe déjà
+        existing_persons = _optimized_face_db.get_all_persons()
+        if name in existing_persons:
+            return {
+                "success": False,
+                "error": f"Person '{name}' already exists in database. Use a different name or remove the existing entry first."
+            }
+        
+        logger.info("📸 Adding new person to database: %s (role: %s)", name, role or "none")
+        
+        # Récupérer l'image actuelle de la caméra
+        current_image = get_current_camera_frame_base64()
+        if not current_image:
+            return {
+                "success": False,
+                "error": "No camera frame available. Please ensure camera is active."
+            }
+        
+        # Préparer les images (une seule pour l'instant)
+        images_to_add = [current_image]
+        
+        # TODO: Si capture_multiple est True, on pourrait capturer plusieurs frames
+        # avec un délai pour permettre à l'utilisateur de bouger légèrement
+        if capture_multiple:
+            logger.info("Multiple capture requested - waiting for additional frames...")
+            # Attendre un peu et capturer d'autres frames
+            await asyncio.sleep(0.5)
+            frame2 = get_current_camera_frame_base64()
+            if frame2 and frame2 != current_image:
+                images_to_add.append(frame2)
+            
+            await asyncio.sleep(0.5)
+            frame3 = get_current_camera_frame_base64()
+            if frame3 and frame3 not in images_to_add:
+                images_to_add.append(frame3)
+        
+        # Ajouter à la base de données
+        metadata = {}
+        if role:
+            metadata["role"] = role
+        
+        try:
+            success = await asyncio.to_thread(
+                _optimized_face_db.add_person,
+                name,
+                images_to_add,
+                metadata
+            )
+            
+            if success:
+                stats = _optimized_face_db.get_stats()
+                logger.info("✓ Successfully added %s to database (%d images)", 
+                           name, len(images_to_add))
+                
+                return {
+                    "success": True,
+                    "name": name,
+                    "images_captured": len(images_to_add),
+                    "role": role or "none",
+                    "message": f"Successfully added {name} to the database with {len(images_to_add)} image(s)",
+                    "total_persons_in_db": stats.get("total_persons", 0),
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "Failed to add person to database. No face detected in the captured image(s)."
+                }
+                
+        except Exception as e:
+            logger.error("Failed to add person to database: %s", e)
+            return {
+                "success": False,
+                "error": f"Failed to add person: {str(e)}"
+            }
+
+
+class RemovePersonFromDatabase(Tool):
+    """Remove a person from the face recognition database."""
+    
+    name = "remove_person_from_database"
+    description = """Remove a person from the face recognition database.
+    Use this when someone asks to be forgotten, removed, or deleted from your memory.
+    Examples: "Forget me", "Remove me from your database", "Delete John from memory"
+    
+    WARNING: This permanently deletes the person's data."""
+    
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "The name of the person to remove (must match exactly)",
+            },
+            "confirm": {
+                "type": "boolean",
+                "description": "Confirmation flag - must be true to proceed with deletion",
+                "default": False,
+            },
+        },
+        "required": ["name", "confirm"],
+    }
+    
+    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> Dict[str, Any]:
+        """Supprime une personne de la base de données."""
+        global _optimized_face_db
+        
+        if not FACE_DB_OPTIMIZED_AVAILABLE or _optimized_face_db is None:
+            return {"error": "Face database not initialized"}
+        
+        name = kwargs.get("name", "").strip()
+        confirm = kwargs.get("confirm", False)
+        
+        if not name:
+            return {"success": False, "error": "Name is required"}
+        
+        if not confirm:
+            return {
+                "success": False,
+                "error": "Deletion not confirmed. Set confirm=true to proceed."
+            }
+        
+        logger.info("🗑️ Removing person from database: %s", name)
+        
+        try:
+            success = await asyncio.to_thread(
+                _optimized_face_db.remove_person,
+                name
+            )
+            
+            if success:
+                stats = _optimized_face_db.get_stats()
+                logger.info("✓ Successfully removed %s from database", name)
+                return {
+                    "success": True,
+                    "name": name,
+                    "message": f"Successfully removed {name} from the database",
+                    "total_persons_remaining": stats.get("total_persons", 0),
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"Person '{name}' not found in database"
+                }
+                
+        except Exception as e:
+            logger.error("Failed to remove person: %s", e)
+            return {"success": False, "error": f"Failed to remove person: {str(e)}"}
+
+
+class ListKnownPersons(Tool):
+    """List all persons registered in the face recognition database."""
+    
+    name = "list_known_persons"
+    description = """List all persons registered in the face recognition database.
+    Use this when asked 'who do you know?', 'who is in your database?', or 
+    'who can you recognize?'"""
+    
+    parameters_schema = {
+        "type": "object",
+        "properties": {},
+        "required": []
+    }
+    
+    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> Dict[str, Any]:
+        """Liste les personnes connues."""
+        global _optimized_face_db
+        
+        if not FACE_DB_OPTIMIZED_AVAILABLE or _optimized_face_db is None:
+            return {"error": "Face database not initialized"}
+        
+        try:
+            persons = _optimized_face_db.get_all_persons()
+            stats = _optimized_face_db.get_stats()
+            
+            logger.info("📋 Listed %d known persons", len(persons))
+            
+            return {
+                "success": True,
+                "count": len(persons),
+                "persons": persons,
+                "total_embeddings": stats.get("total_embeddings", 0),
+                "model_used": stats.get("model_used", "unknown")
+            }
+        except Exception as e:
+            logger.error("Failed to list known persons: %s", e)
+            return {"error": f"Failed to list persons: {str(e)}"}
+
+
+class GetDatabaseStats(Tool):
+    """Get statistics about the face recognition database."""
+    
+    name = "get_database_stats"
+    description = """Get detailed statistics about the face recognition database,
+    including number of persons, embeddings per person, and model information.
+    Use this to check database health or answer questions about the recognition system."""
+    
+    parameters_schema = {
+        "type": "object",
+        "properties": {},
+        "required": []
+    }
+    
+    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> Dict[str, Any]:
+        """Récupère les statistiques de la base de données."""
+        global _optimized_face_db
+        
+        if not FACE_DB_OPTIMIZED_AVAILABLE or _optimized_face_db is None:
+            return {"error": "Face database not initialized"}
+        
+        try:
+            stats = _optimized_face_db.get_stats()
+            logger.info("📊 Database stats: %d persons, %d embeddings", 
+                       stats.get("total_persons", 0), 
+                       stats.get("total_embeddings", 0))
+            return stats
+        except Exception as e:
+            logger.error("Failed to get database stats: %s", e)
+            return {"error": f"Failed to get stats: {str(e)}"}
+        
 
 
 # Registry & specs (dynamic)

@@ -13,6 +13,9 @@ env/
 # Environment variables
 .env
 
+# database
+face_database.json
+
 # Build and distribution
 build/
 dist/
@@ -56,3 +59,4 @@ cache/
 .directory
 .Trash-*
 .nfs*
+

@@ -1,3 +1,4 @@
+# console.py
 """Bidirectional local audio stream.
 
 records mic frames to the handler and plays handler audio frames to the speaker.

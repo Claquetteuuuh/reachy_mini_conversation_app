@@ -1,3 +1,4 @@
+# main.py
 """Entrypoint for the Reachy Mini conversation app."""
 
 import os
@@ -19,6 +20,7 @@ from reachy_mini_conversation_app.utils import (
 from reachy_mini_conversation_app.console import LocalStream
 from reachy_mini_conversation_app.openai_realtime import OpenaiRealtimeHandler
 from reachy_mini_conversation_app.audio.head_wobbler import HeadWobbler
+from reachy_mini_conversation_app.tools import initialize_optimized_face_database
 
 
 def update_chatbot(chatbot: List[Dict[str, Any]], response: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -38,6 +40,9 @@ def main(use_pc_camera: bool=False) -> None:
         logger.warning("Head tracking is not activated due to --no-camera.")
 
     robot = ReachyMini()
+    
+    initialize_optimized_face_database()
+
 
     # Check if running in simulation mode without --gradio
     if robot.client.get_status()["simulation_enabled"] and not args.gradio:
@@ -130,4 +135,4 @@ def main(use_pc_camera: bool=False) -> None:
 
 
 if __name__ == "__main__":
-    main(False)
+    main(True)

@@ -1,27 +1,45 @@
+# camera_worker.py
 """Camera worker thread with frame buffering and face tracking.
 
 Ported from main_works.py camera_worker() function to provide:
 - 30Hz+ camera polling with thread-safe frame buffering
 - Face tracking integration with smooth interpolation
 - Latest frame always available for tools
+- Face recognition support (stores current frame as base64)
 - MODIFICATION: Support pour utiliser la caméra du PC au lieu de celle du robot
 """
 
 import time
+import base64
 import logging
 import threading
 from typing import Any, List, Tuple
+from io import BytesIO
 
 import cv2
 import numpy as np
 from numpy.typing import NDArray
 from scipy.spatial.transform import Rotation as R
+from PIL import Image
 
 from reachy_mini import ReachyMini
 from reachy_mini.utils.interpolation import linear_pose_interpolation
 
 
 logger = logging.getLogger(__name__)
+
+# AJOUT: Variable globale pour stocker le frame actuel pour la reconnaissance faciale
+_current_camera_frame: str | None = None
+
+
+def get_current_camera_frame_base64() -> str | None:
+    """Récupère le frame actuel de la caméra en base64 (thread-safe).
+    
+    Returns:
+        Base64 encoded JPEG image string, or None if no frame available
+    """
+    global _current_camera_frame
+    return _current_camera_frame
 
 
 class CameraWorker:
@@ -134,6 +152,7 @@ class CameraWorker:
         """Enable the camera worker loop.
 
         Ported from main_works.py camera_worker() with same logic.
+        Enhanced with face recognition frame storage.
         """
         logger.debug("Starting camera working loop")
 
@@ -161,6 +180,25 @@ class CameraWorker:
                     # Thread-safe frame storage
                     with self.frame_lock:
                         self.latest_frame = frame  # .copy()
+                    
+                    # AJOUT: Mettre à jour le frame pour la reconnaissance faciale
+                    # Ceci se fait en dehors du lock pour éviter les blocages
+                    try:
+                        global _current_camera_frame
+                        
+                        # Convertir numpy array BGR vers RGB pour PIL
+                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        pil_image = Image.fromarray(frame_rgb)
+                        
+                        # Convertir en JPEG base64
+                        buffered = BytesIO()
+                        pil_image.save(buffered, format="JPEG", quality=85)
+                        img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+                        
+                        _current_camera_frame = img_base64
+                        
+                    except Exception as e:
+                        logger.error("Error updating frame for face recognition: %s", e)
 
                     # Check if face tracking was just disabled
                     if self.previous_head_tracking_state and not self.is_head_tracking_enabled:

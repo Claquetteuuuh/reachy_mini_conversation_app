@@ -33,10 +33,16 @@ dependencies = [
 local_vision = ["torch", "transformers", "num2words"]
 yolo_vision = ["ultralytics", "supervision"]
 mediapipe_vision = ["mediapipe>=0.10.14"]
+face_recognition = [
+  "deepface>=0.0.79",
+  "tensorflow>=2.13.0",
+  "Pillow>=10.0.0",
+]
 all_vision = [
   "reachy_mini_conversation_app[local_vision]",
   "reachy_mini_conversation_app[yolo_vision]",
   "reachy_mini_conversation_app[mediapipe_vision]",
+  "reachy_mini_conversation_app[face_recognition]",
 ]
 
 [dependency-groups]
